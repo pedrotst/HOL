@@ -7061,25 +7061,10 @@ def test_a_theorem_jumps_to_the_script_it_is_proved_in():
 
 
 def test_a_target_outside_the_file_is_an_absolute_path():
-    """A target the editor cannot open reads exactly like no target.
-
-    `pathToUri` gave a path the `file://` scheme and stopped there, but
-    Poly/ML records a declaration's file as the path it was compiled
-    under, and the structures compiled into `bin/hol` were `use`d from
-    `$HOLDIR/tools-poly` -- so `HOLSourceAST` reports
-    `../tools/parsing/HOLSourceAST.sml`.  Sent as
-    `file://../tools/parsing/HOLSourceAST.sml` that resolves against
-    nothing and VS Code declines it in silence, which from the outside
-    is indistinguishable from the jump finding nothing at all.
-
-    `startswith("file://")` is not the check: the broken form passed
-    it.  The target has to be absolute, and has to name a file that is
-    there."""
+    """An external definition target must be an absolute existing file."""
     d = tempfile.mkdtemp(prefix="lsp_absuri_")
     try:
-        # `poly-init2` compiles this structure into `bin/hol`, so the
-        # buffer needs nothing built in order to compile, and the
-        # declaration it reaches is one of the relative-path ones.
+        # HOLSourceAST is loaded from a relative path during bootstrap.
         src = "open HOLSourceAST\n"
         c = Client(d)
         try:
@@ -7117,28 +7102,70 @@ def test_a_target_outside_the_file_is_an_absolute_path():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_basis_jump_resolves_through_a_polyml_checkout():
+    """Resolve Basis declarations through a matching Poly/ML checkout."""
+    d = tempfile.mkdtemp(prefix="lsp_basis_")
+    try:
+        poly = os.path.join(d, "polysrc")
+        os.makedirs(os.path.join(poly, "basis"))
+        with open(os.path.join(poly, "basis", "OS.sml"), "w") as f:
+            f.write("".join(f"(* line {i} *)\n" for i in range(1, 1001)))
+        src = "val ok = OS.Process.isSuccess\n"
+        uri = f"file://{d}/basisjump.sml"
+        c = Client(d, env={"HOL_LSP_POLYML_SRC": poly})
+        try:
+            _init(c, d, timeout=30)
+            _did_open(c, uri, src)
+            assert_true(c.wait_for_method("$/compileCompleted", 60),
+                        "compileCompleted")
+            col = src.index("isSuccess") + 2
+            c.send({"jsonrpc": "2.0", "id": 773,
+                    "method": "textDocument/definition",
+                    "params": {"textDocument": {"uri": uri},
+                               "position": {"line": 0, "character": col}}})
+
+            def got(cl):
+                with cl.msgs_lock:
+                    for m in cl.msgs:
+                        if m.get("id") == 773: return m
+                return None
+
+            reply = c.wait_until(got, 20)
+            assert_true(reply is not None, "definition reply arrived")
+            res = reply.get("result")
+            assert_true(res, f"a definition was found ({reply!r})")
+            target = res[0]["targetUri"]
+            assert_true(target.startswith("file:///"),
+                        f"the target is an absolute URI ({target!r})")
+            path = target[len("file://"):]
+            assert_eq(os.path.realpath(path),
+                      os.path.realpath(os.path.join(poly, "basis", "OS.sml")),
+                      "the target is the checkout's own basis/OS.sml")
+            line = res[0]["targetRange"]["start"]["line"]
+            assert_true(0 < line < 1000,
+                        f"at a line Poly recorded ({line!r})")
+            warn = c.wait_for_method("window/showMessage", 1)
+            assert_true(warn is None, f"no complaint about it ({warn!r})")
+        finally:
+            c.close()
+
+        c = Client(d, env={"HOL_LSP_POLYML_SRC": os.path.join(d, "nope")})
+        try:
+            _init(c, d, timeout=30)
+            warn = c.wait_for_method("window/showMessage", 20)
+            assert_true(warn is not None, "a checkout that is not there "
+                                          "is complained about")
+            assert_contains(warn["params"]["message"],
+                            "HOL_LSP_POLYML_SRC",
+                            "and the complaint names the variable")
+        finally:
+            c.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_a_single_clause_fun_carries_poly_properties():
-    """Identifiers inside a one-clause `fun` must answer hover and
-    goto-definition.
-
-    Poly/ML gives a `fun` group a node per `|`-separated clause, but
-    only when there is more than one: a single-clause group IS its
-    clause, with the name, the parameters and the body as its own flat
-    children.  `annotateDec`'s DecFun case descended as though the
-    clause level were always present, walked past the name into
-    nothing, and annotated every identifier in the clause against
-    NONE.  Those nodes then carried `PIdContent` and none of Poly's own
-    properties -- no Type, no DeclaredAt, no DefId/RefId -- which are
-    exactly what hover and goto-definition read.
-
-    A `fun` written with two or more clauses took the other branch and
-    worked, which is what hid this.  So did `val` bindings.  Since
-    `let fun ... in ... end` reaches the same case through LetInEnd,
-    a reference inside a `let`'s function body failed the same way
-    while the expression after `in` was fine.
-
-    Covers a declaration's own name, a reference from a function body,
-    and a reference from inside a `let` binding group."""
+    """Single-clause functions retain properties used by LSP queries."""
     src = ("fun addOne x = x + 1\n"
            "fun useIt w = addOne w\n"
            "val nested = let fun g z = addOne z in g 3 end\n")
@@ -7172,15 +7199,12 @@ def test_a_single_clause_fun_carries_poly_properties():
                             f"{method} replied at {line}:{char}")
                 return reply.get("result")
 
-            # (a) the declaration's own name, in a one-clause `fun`
             at = lines[0].index("addOne")
             hov = ask("textDocument/hover", 0, at)
             assert_true(hov, f"hover on the declaration name ({hov!r})")
             assert_true("int" in (hov.get("contents") or {}).get("value", ""),
                         f"and it carries a type ({hov!r})")
 
-            # (b) a reference from inside a function body, and
-            # (c) a reference from inside a `let` binding group
             for line, what in ((1, "a function body"),
                                (2, "a let binding group")):
                 at = lines[line].index("addOne")
@@ -10489,6 +10513,8 @@ TESTS = [
      test_a_theorem_jumps_to_the_script_it_is_proved_in),
     ("a_target_outside_the_file_is_an_absolute_path",
      test_a_target_outside_the_file_is_an_absolute_path),
+    ("a_basis_jump_resolves_through_a_polyml_checkout",
+     test_a_basis_jump_resolves_through_a_polyml_checkout),
     ("a_single_clause_fun_carries_poly_properties",
      test_a_single_clause_fun_carries_poly_properties),
     ("a_reused_tail_answers_as_a_full_compile_would",
