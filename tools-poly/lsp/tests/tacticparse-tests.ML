@@ -363,6 +363,61 @@ val _ = let
         Select {selector = SelectFirst, mode = SelectSolve,
                 body = [Leaf {kind = TacticLeaf, ...}]}] => true
      | _ => false)
+  (* A `Rename's span is its quotation, not a tactic, so its source
+     has to name `Q.RENAME_TAC' -- qualified, as `hol.state0' opens no
+     Q -- and pass the quotation through unwrapped. *)
+  val _ = tprint "TacticParse executableLeaf names rename's entry point"
+  val renameText = "rename [`x`]"
+  val _ = assert "rename's leaf is not `Q.RENAME_TAC' on its quotation"
+    (case parseTactic renameText of
+       Group (_, _, leaf as Rename _) =>
+         executableLeaf renameText leaf =
+           SOME {source = Synthesised "Q.RENAME_TAC [`x`]", kind = Tactic}
+     | _ => false)
+  val _ = tprint "TacticParse executableLeaf treats a >>~- selector alike"
+  val selectText = "a >>~- ([`x`], b)"
+  val _ = assert ">>~-'s rename selector lost its quotation"
+    (case parseTactic selectText of
+       ThenLT (_, [LSelectThen (Group (_, _, leaf as Rename _), _)]) =>
+         executableLeaf selectText leaf =
+           SOME {source = Synthesised "Q.RENAME_TAC [`x`]", kind = Tactic}
+     | _ => false)
+  val _ = tprint "TacticParse: complete leaf spans remains verbatim"
+  val _ = let
+    val source = "rename [`x`]"
+    val finish = String.size source
+    val leaf = Group (true, (0, finish), Rename (7, finish))
+  in
+    assert "complete Group span was not returned verbatim"
+    (case executableLeaf source leaf of
+      SOME {source = Verbatim text, kind = Tactic} =>
+        text = source
+      | _ => false)
+  end
+  val _ = tprint "TacticParse: select-goal lowering is a qualified list Tactic"
+  val _ = let
+    val source = "[`x`]"
+    val leaf = LSelectGoal (0, String.size source)
+  in 
+    assert "LSelectGoal was not lowered to Q.SELECT_GOAL_LT"
+    (case executableLeaf source leaf of
+      SOME {source = Synthesised text, kind = ListTactic} =>
+         text = "Q.SELECT_GOAL_LT [`x`]"
+      | _ => false)
+  end
+  val _ = tprint "TacticParse: spanless reverse lowers as a list tactic"
+  val _ = assert "LReverse did not use the inverse-printer fallback"
+    (case executableLeaf "" LReverse of
+      SOME { source = Synthesised text,
+              kind = ListTactic} =>
+          text = "REVERSE_LT"
+      | _ => false)
+  val _ = tprint "TacticParse: semantic no-op has no executable leaf"
+  val _ =
+    assert "Then [] unexpectedly produced executable source"
+    (case executableLeaf "" (Then []) of
+      NONE => true
+      | _ => false)
 in
   ()
 end
@@ -408,6 +463,6 @@ in
     ("val x = (1, 2)\n", "val x = (1, 2)")]
 end
 
-val () = OS.Process.exit
+(* val () = OS.Process.exit
            (if !failcount = 0 then OS.Process.success
-            else OS.Process.failure)
+            else OS.Process.failure) *)

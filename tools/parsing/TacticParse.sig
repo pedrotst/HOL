@@ -95,6 +95,19 @@ datatype tac_frag
     tac_frag_open * tac_frag_mid * tac_frag_close *
     tac_frag list list * (int * int) tac_expr
 
+datatype executable_source
+  = Verbatim of string
+  | Synthesised of string
+
+datatype executable_kind
+  = Tactic
+  | ListTactic
+
+val executableLeaf :
+  string ->
+  (int * int) tac_expr ->
+  {source : executable_source, kind : executable_kind} option
+
 val linearize: ((int * int) tac_expr -> bool) ->
   (int * int) tac_expr -> tac_frag list
 

@@ -760,4 +760,50 @@ fun sliceTacticBlock start stop sliceClose sp e = let
   val (ll, l) = slice sp (linearize isAtom e) ([], [])
   in rev (rev l :: ll) end
 
+datatype executable_source
+  = Verbatim of string
+  | Synthesised of string
+
+datatype executable_kind
+  = Tactic
+  | ListTactic
+
+fun textAt tacText (s, e) = String.substring (tacText, s, e - s)
+
+fun executableKindOf te = case te of
+    LReverse => ListTactic
+  | LSelectGoal _ => ListTactic
+  | LSelectGoals _ => ListTactic
+  | LFirst [] => ListTactic
+  | LTacsToLT _ => ListTactic
+  | LOpaque _ => ListTactic
+  | _ => Tactic
+
+fun executableLeaf tacText te :
+  {source : executable_source, kind : executable_kind} option = let
+  val txt = textAt tacText
+  val kind = executableKindOf te
+  fun synthesised source =
+    SOME {source = Synthesised source, kind = kind}
+  fun verbatim source =
+    SOME {source = Verbatim source, kind = kind}
+  (* `tr pat' spans the whole right operand of `>~', brackets and
+    all -- as `Rename' also assumes -- so it is passed through, not
+    wrapped again: wrapping produced `>~ [[pat]]', which never
+    compiled.  And a selector is a list_tactic, wanted whole: run as
+    `ALL_TAC >~ pats' through `expand' it saw each goal on its own
+    and so could never pick one out.  Name the list_tactic itself
+    and let `expand_list' hand it the focus. *)
+  in case te of
+      Subgoal span      => synthesised ("BasicProvers.subgoal " ^ txt span)
+    | LSelectGoal span  => synthesised ("Q.SELECT_GOAL_LT " ^ txt span)
+    | LSelectGoals span => synthesised ("Q.SELECT_GOALS_LT " ^ txt span)
+    | Rename span       => synthesised ("Q.RENAME_TAC " ^ txt span)
+    | _ => case topSpan te of
+        SOME span => verbatim (txt span)
+      | NONE => Option.map (fn s => {source = Synthesised s, kind = kind})
+                           (printTacAsSML tacText te)
+  end
+
+
 end
